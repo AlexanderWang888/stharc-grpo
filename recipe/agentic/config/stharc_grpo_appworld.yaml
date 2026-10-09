@@ -1,0 +1,222 @@
+# ======================================================================
+# STHARC-GRPO 配置 — AppWorld（真实数据 / 软依赖 credit assignment 验证）
+# ======================================================================
+# ⚠️ 注意（2026-07-22）：run_stharc_grpo_appworld.sh 已不再通过
+# --config-path/--config-name 加载本文件，原因见 stharc_grpo_public.yaml 顶部
+# 注释（本文件 `defaults: - _self_` 绕开了 ppo_trainer.yaml 的 defaults 组合
+# 树，导致 critic.enable / reward.reward_model.* 等字段缺失报 struct 错误）。
+# 现在所有字段都通过 run_stharc_grpo_appworld.sh 的 CLI overrides 传入，本文件
+# 仅作为字段取值的参考文档保留。
+# ======================================================================
+# 与 stharc_grpo_public.yaml 的关键差异：
+#   - env          : recipe.agentic.envs.AppWorldEnv（真实 AppWorld 沙箱代码执行 +
+#                     skill_* harness 工具，见 envs/appworld_env.py 头部说明）
+#   - reward       : recipe.agentic.reward.AppWorldVerifierReward（仅官方
+#                     world.evaluate() 硬 success 0/1；不叠加效率/软分；且不走
+#                     diagnostic_reward 整形——那条管道只给机制消融用）
+#   - harness state: 仍复用 recipe.agentic.stharc.generic_harness_state（与
+#                     stharc_grpo_public.yaml 相同的进程内 dict 沙箱，只是这里存的
+#                     "skill content" 是 Python 函数源码，不是纯文本）
+#   - data         : research/dataset_explore/idea2_datasets/build_appworld_dataset.py
+#                     产出（每条 chain 拼接 2~8 个真实 AppWorld scenario，每个
+#                     scenario 内部再取一段真实任务顺序子序列 K_thread∈{2,3}，交织
+#                     成一条链；总 K 不写死，实测 mean≈11.3 / std≈4.6，与其余 6 个
+#                     数据集同量级，见 dataset_explore/APPWORLD_INTEGRATION.md §5）
+#
+# 前置依赖（训练机上必须能装 appworld 包 + 本地缓存好 data/，见 README）：
+#   pip install appworld  （或 pip install "git+https://github.com/StonyBrookNLP/appworld.git"）
+#   export APPWORLD_ROOT=/path/to/research/appworld_explore   # 指向含 data/ 的父目录
+#
+# 用法：
+#   bash research/training_code_public/recipe/agentic/scripts/run_stharc_grpo_appworld.sh
+#
+# 数据准备（先于训练运行）：
+#   PYTHONPATH=research/training_code_public:. python3 \
+#       research/dataset_explore/idea2_datasets/build_appworld_dataset.py \
+#       --out-dir research/dataset_explore/idea2_datasets_out \
+#       --parquet-dir research/training_code_public/data/stharc_appworld
+# ======================================================================
+
+defaults:
+  - _self_
+
+hydra:
+  run:
+    dir: outputs/stharc_grpo_appworld/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen2.5-7B-Instruct
+    tokenizer_path: Qwen/Qwen2.5-7B-Instruct
+    external_lib: null
+    override_config: {}
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+
+  rollout:
+    name: vllm
+    temperature: 0.7
+    top_k: -1
+    top_p: 0.9
+    # G=4：同一 chain_id 的 4 条并行 chain 构成一个 GRPO group
+    n: 4
+    # AppWorld 单任务真实步数量级远高于纯文本 QA（SAGE 论文 Qwen2.5-32B 平均
+    # 12~16 步/task，且每步的 code/observation 比纯文本 QA 更长），留足裕度。
+    prompt_length: 4096
+    response_length: 24576
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.75
+    free_cache_engine: true
+    max_model_len: 28672
+    max_num_seqs: 64
+    log_prob_micro_batch_size_per_gpu: 2
+    log_prob_use_dynamic_bsz: true
+    log_prob_max_token_len_per_gpu: 28000
+    agent:
+      agent_loop_config_path: ???
+    multi_turn:
+      tool_config_path: null
+      function_tool_path: null
+    vllm:
+      max_model_len: 28672
+      max_num_seqs: 64
+    trace:
+      project_name: stharc_train_appworld
+      experiment_name: stharc_grpo_appworld
+      backend: none
+      token2text: false
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 2
+    fsdp:
+      param_offload: false
+
+  actor:
+    loss_agg_mode: seq-mean-token-sum
+    micro_batch_size_per_gpu: 1
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: 28000
+    use_dynamic_bsz: true
+    grad_clip: 1.0
+    entropy_coeff: 0.001
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+    optim:
+      lr: 1e-6
+      weight_decay: 0.01
+    fsdp:
+      param_offload: false
+      grad_offload: false
+      optimizer_offload: false
+
+critic:
+  model:
+    path: null
+  optim:
+    lr: 0
+
+reward_model:
+  enable: false
+
+algorithm:
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: true
+  kl_penalty: low_var_kl
+
+data:
+  train_files: data/stharc_appworld/train.parquet
+  val_files: data/stharc_appworld/val.parquet
+  train_batch_size: 32
+  val_batch_size: 19
+  max_prompt_length: 4096
+  max_response_length: 24576
+  return_raw_prompt: true
+  return_raw_chat: true
+  shuffle: true
+  filter_overlong_prompts: false
+  data_source: stharc
+
+trainer:
+  total_epochs: 4
+  total_training_steps: 300
+  save_freq: 30
+  test_freq: 30
+  project_name: stharc_train_appworld
+  experiment_name: stharc_grpo_appworld
+  logger: ["console"]
+  rollout_data_dir: /tmp/stharc_appworld_rl/rollout_logs/stharc_grpo_appworld
+  default_hdfs_dir: /tmp/stharc_appworld_rl/checkpoints
+  wandb:
+    entity: null
+    project: stharc_train_appworld
+    name: stharc_grpo_appworld
+
+# ── STHARC 专有配置（AppWorld 版）───────────────────────────────────────────
+stharc:
+  env:
+    _target_: recipe.agentic.envs.AppWorldEnv
+    max_steps: 30
+    temperature: 0.7
+    max_tokens: 1536
+    request_timeout: 180.0
+    # 指向 research/appworld_explore（其下需有 data/ 目录）；也可以不填，
+    # 训练启动前用 export APPWORLD_ROOT=... 设置。
+    appworld_root: null
+    experiment_name_prefix: stharc_rl
+    max_code_output_chars: 12000
+    # 拼 Thought/Action + execute(apis.*) 格式演示；也可用 STHARC_FORMAT_FEW_SHOT=1
+    format_few_shot: false
+
+  harness_state_module: recipe.agentic.stharc.generic_harness_state
+
+  reward:
+    components:
+      # 只读官方 world.evaluate().success；不做效率/软分
+      - _target_: recipe.agentic.reward.AppWorldVerifierReward
+        weight: 1.0
+        enabled: true
+        partial_credit: false
+    normalize: false
+    clip_min: 0.0
+    clip_max: 1.0
+
+  vllm_base_url: "http://127.0.0.1:8000/v1"
+  vllm_model_name: "qwen-7b-rl"
+  per_rollout_timeout_sec: 900
+
+  # ── STHARC 算法参数 ──────────────────────────────────────────────────────
+  gamma: 0.9
+  lam: 0.25
+  credit: "pu"
+  attribution: "latest_only"
+  run_frozen_chain: false
+  base_user_id: "default"
+  max_task_response_length: null
+  max_task_context_length: null
+  abort_on_packing_truncation: false
+  abort_on_exec_truncation: false
+
+  agent_loop_config_path: null
+
+# ── main_ppo_sync 必需的顶层字段（与 ppo_trainer.yaml 保持一致）────────────────
+transfer_queue:
+  enable: false
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: 100000
+      num_data_storage_units: 8
+
+ray_kwargs:
+  ray_init:
+    num_cpus: null
+  timeline_json_file: null
+
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null

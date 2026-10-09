@@ -1,0 +1,10 @@
+# Agent loop 注册列表（list 格式，被 AgentLoopWorker.agent_loop_config_path 加载）
+# 每一项通过 hydra.utils.instantiate 实例化，name 对应 parquet 的 agent_name 字段。
+#
+# stharc 必须走 recipe.agentic.stharc.*（仅 research 树有此包），
+# 避免 PYTHONPATH 误命中主仓 verl/recipe/agentic/agent_loop.py（无 STHARCAgentLoop）。
+# agent_loop / entry 两个入口等价，均 re-export 父模块 STHARCAgentLoop。
+- name: agentic
+  _target_: recipe.agentic.agent_loop.AgenticAgentLoop
+- name: stharc
+  _target_: recipe.agentic.stharc.agent_loop.STHARCAgentLoop

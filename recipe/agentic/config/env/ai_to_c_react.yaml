@@ -1,0 +1,13 @@
+# ai_to_c_react 业务专属配置
+# 被 config/agentic_grpo_sync.yaml 的 agentic.env._target_ 引用
+
+_target_: recipe.agentic.envs.AiToCReactEnv
+
+# 业务包根（训练集群上换成实际路径）
+ai_to_c_repo_path: /workspace/ai2c
+
+# session 目录指向 tmpfs，避免训练堆积 session 文件
+session_dir_override: /tmp/rl_sessions
+
+# 是否同时记录子 agent trace（训练时建议 False）
+record_subagent_traces: false

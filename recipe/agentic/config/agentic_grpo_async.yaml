@@ -1,0 +1,127 @@
+# ======================================================================
+# Agentic GRPO 全异步配置 — ai_to_c 32B 主脑训练
+# ======================================================================
+# 与 sync 版的区别：
+#   - rollout.name = "vllm_async"       → 异步 rollout engine
+#   - rollout.n = 4                     → 并行采样 4 条轨迹
+#   - actor.micro_batch_size_per_gpu=4  → 更大 micro batch
+#   - agentic.per_rollout_timeout_sec=300 → 更短超时（异步并发）
+#   - 其余与 sync 版完全一致，AgenticAgentLoop 零代码修改
+# ======================================================================
+
+defaults:
+  - override hydra/launcher: ray
+
+hydra:
+  run:
+    dir: outputs/agentic_grpo_async/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen2.5-32B-Instruct
+    tokenizer_path: Qwen/Qwen2.5-32B-Instruct
+    external_lib: null
+    override_config: {}
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+
+  rollout:
+    name: vllm_async
+    temperature: 0.6
+    top_k: -1
+    top_p: 0.9
+    n: 4
+    prompt_length: 16384
+    response_length: 8192
+    tensor_model_parallel_size: 2
+    gpu_memory_utilization: 0.85
+    agent:
+      agent_loop_config_path: ???
+    multi_turn:
+      tool_config_path: null
+      function_tool_path: null
+    trace:
+      project_name: agentic_train_offline
+      experiment_name: ai_to_c_32b_async
+      backend: none
+      token2text: false
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 4
+    fsdp:
+      param_offload: false
+
+  actor:
+    micro_batch_size_per_gpu: 4
+    ppo_mini_batch_size: 256
+    ppo_micro_batch_size_per_gpu: 4
+    grad_clip: 1.0
+    entropy_coeff: 0.001
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+    optim:
+      lr: 1e-6
+      weight_decay: 0.01
+    fsdp:
+      param_offload: false
+      grad_offload: false
+      optimizer_offload: false
+
+critic:
+  model:
+    path: null
+  optim:
+    lr: 0
+
+reward_model:
+  enable: false
+
+data:
+  train_files: data/ai_to_c/train.parquet
+  val_files: data/ai_to_c/val.parquet
+  train_batch_size: 256
+  val_batch_size: 64
+  max_prompt_length: 16384
+  max_response_length: 8192
+  return_raw_prompt: true
+  return_raw_chat: true
+  shuffle: true
+  filter_overlong_prompts: true
+  data_source: ai_to_c
+
+trainer:
+  total_epochs: 1
+  total_training_steps: 500
+  save_freq: 50
+  test_freq: 50
+  project_name: agentic_train_offline
+  experiment_name: ai_to_c_32b_async
+  logger: ["console", "wandb"]
+  wandb:
+    entity: null
+    project: agentic_train_offline
+    name: ai_to_c_32b_async
+  rollout_data_dir: /mnt/workspace/agentic_rl/rl/rollout_logs/ai_to_c_32b_async
+
+agentic:
+  env:
+    _target_: recipe.agentic.envs.AiToCReactEnv
+    ai_to_c_repo_path: /workspace/ai2c
+    session_dir_override: /tmp/rl_sessions
+    record_subagent_traces: false
+
+  reward:
+    components:
+      - _target_: recipe.agentic.reward.components.AiToCEfficientReward
+        weight: 1.0
+        enabled: true
+        target_steps: 3
+        max_steps: 7
+    normalize: false
+    clip_min: 0.0
+    clip_max: 1.0
+
+  vllm_base_url: "http://127.0.0.1:8000/v1"
+  vllm_model_name: "qwen-32b-rl"
+  per_rollout_timeout_sec: 300
+  agent_loop_config_path: null

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# ======================================================================
+# MuSiQue 三角对照：λ=0 / STHARC / Random-PU / SAGE-style / SkillRise-style
+# ======================================================================
+# 所有任务保留上游奖励，不按读写类型屏蔽或整形；ExactMatch 设置不变。
+# 此发布协议不等价于原实验的奖励协议。
+#
+# 用法（在 training_code_public 目录）：
+#   METHOD=lambda0 MODEL_PATH=/mnt/workspace/ckpt/Qwen3.5-9B \
+#     bash recipe/agentic/scripts/run_stharc_triangle_musique.sh
+#
+#   METHOD=stharc STHARC_LAM=0.25 STHARC_ATTRIBUTION=latest_only \
+#     bash recipe/agentic/scripts/run_stharc_triangle_musique.sh
+#
+#   METHOD=random_pu STHARC_LAM=0.25 \
+#     bash recipe/agentic/scripts/run_stharc_triangle_musique.sh
+#
+#   METHOD=sage MODEL_PATH=/mnt/workspace/ckpt/Qwen3.5-9B \
+#     bash recipe/agentic/scripts/run_stharc_triangle_musique.sh
+#
+#   METHOD=skillrise MODEL_PATH=/mnt/workspace/ckpt/Qwen3.5-9B \
+#     bash recipe/agentic/scripts/run_stharc_triangle_musique.sh
+#
+#   未训练 base（只跑 held-out val，指标与训练中 val 相同：avg_task / total）：
+#   METHOD=base MODEL_PATH=/mnt/workspace/ckpt/Qwen3.5-9B \
+#     bash recipe/agentic/scripts/run_stharc_triangle_musique.sh
+# ======================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+METHOD="${METHOD:-stharc}"
+
+if [[ "${ALLOW_PPO_SYNC:-0}" != "1" ]]; then
+  export PPO_ENTRY=verl.trainer.main_ppo
+fi
+echo "[triangle-musique] PPO_ENTRY=${PPO_ENTRY:-verl.trainer.main_ppo}"
+
+case "${METHOD}" in
+  lambda0|lam0|chain_grpo)
+    export STHARC_CREDIT=pu
+    export STHARC_LAM=0
+    export STHARC_ATTRIBUTION="${STHARC_ATTRIBUTION:-gamma_decay}"
+    export RUN_ID="${RUN_ID:-musique_verbatim_mechlike_lambda0_$(date +%Y%m%d_%H%M%S)}"
+    echo "[triangle-musique] METHOD=lambda0 → lam=0 (mechlike deferred_topo)"
+    ;;
+  stharc|correct|pu)
+    export STHARC_CREDIT=pu
+    # 必须强制写入：同 shell 里刚跑完 lambda0 时 STHARC_LAM=0 仍在，
+    # 若用 ${STHARC_LAM:-0.25} 会静默变成假 STHARC（本 arm 曾因此整跑 lam=0）。
+    # 自定义 λ：FORCE_STHARC_LAM=1 STHARC_LAM=0.5
+    if [[ "${FORCE_STHARC_LAM:-0}" == "1" || "${FORCE_STHARC_LAM:-0}" == "true" ]]; then
+      export STHARC_LAM="${STHARC_LAM:-0.25}"
+    else
+      export STHARC_LAM=0.25
+    fi
+    export STHARC_ATTRIBUTION="${STHARC_ATTRIBUTION:-latest_only}"
+    export STHARC_PU_REQUIRE_CLEAN="${STHARC_PU_REQUIRE_CLEAN:-true}"
+    export RUN_ID="${RUN_ID:-musique_verbatim_mechlike_stharc_lo025_puclean_$(date +%Y%m%d_%H%M%S)}"
+    echo "[triangle-musique] METHOD=stharc → lam=${STHARC_LAM} attr=${STHARC_ATTRIBUTION} pu_require_clean=${STHARC_PU_REQUIRE_CLEAN}"
+    ;;
+  random_pu|random|shuffle)
+    export STHARC_CREDIT=pu
+    if [[ "${FORCE_STHARC_LAM:-0}" == "1" || "${FORCE_STHARC_LAM:-0}" == "true" ]]; then
+      export STHARC_LAM="${STHARC_LAM:-0.25}"
+    else
+      export STHARC_LAM=0.25
+    fi
+    export STHARC_ATTRIBUTION=random_shuffle
+    export STHARC_SHUFFLE_SEED="${STHARC_SHUFFLE_SEED:-0}"
+    export RUN_ID="${RUN_ID:-musique_verbatim_mechlike_random_pu_025_$(date +%Y%m%d_%H%M%S)}"
+    echo "[triangle-musique] METHOD=random_pu → lam=${STHARC_LAM} attr=random_shuffle"
+    ;;
+  sage|sage_style)
+    export STHARC_CREDIT=sage
+    export STHARC_LAM=0
+    export STHARC_RUN_FROZEN=false
+    export STHARC_PU_REQUIRE_CLEAN="${STHARC_PU_REQUIRE_CLEAN:-true}"
+    export RUN_ID="${RUN_ID:-musique_verbatim_mechlike_sage_$(date +%Y%m%d_%H%M%S)}"
+    echo "[triangle-musique] METHOD=sage → credit=sage lam=0 frozen=off pu_require_clean=${STHARC_PU_REQUIRE_CLEAN}"
+    ;;
+  skillrise|skill_rise)
+    export STHARC_CREDIT=skillrise
+    export STHARC_LAM=0
+    export STHARC_RUN_FROZEN=false
+    export STHARC_SKILLRISE_GAMMA="${STHARC_SKILLRISE_GAMMA:-0.6}"
+    export STHARC_PU_REQUIRE_CLEAN="${STHARC_PU_REQUIRE_CLEAN:-true}"
+    export RUN_ID="${RUN_ID:-musique_verbatim_mechlike_skillrise_$(date +%Y%m%d_%H%M%S)}"
+    echo "[triangle-musique] METHOD=skillrise → credit=skillrise lam=0 frozen=off γ_curate=${STHARC_SKILLRISE_GAMMA} pu_require_clean=${STHARC_PU_REQUIRE_CLEAN}"
+    ;;
+  base|untrained|eval_base)
+    # 未训练 Qwen3.5-9B：同一份 val.parquet，所有任务保留上游 ExactMatch 奖励。
+    # lam 不影响 total / avg_task；关掉 resume，避免误吃旧 ckpt。
+    export EVAL_ONLY=1
+    export VAL_ONLY=1
+    export RESUME_MODE=disable
+    export STHARC_CREDIT=pu
+    export STHARC_LAM=0
+    export STHARC_ATTRIBUTION="${STHARC_ATTRIBUTION:-gamma_decay}"
+    export RUN_ID="${RUN_ID:-musique_verbatim_mechlike_base_eval_$(date +%Y%m%d_%H%M%S)}"
+    echo "[triangle-musique] METHOD=base → untrained MODEL_PATH, EVAL_ONLY+val_only, no ckpt"
+    ;;
+  *)
+    echo "ERROR: METHOD must be lambda0 | stharc | random_pu | sage | skillrise | base  (got: ${METHOD})"
+    exit 2
+    ;;
+esac
+
+exec bash "${SCRIPT_DIR}/run_stharc_grpo_musique.sh"

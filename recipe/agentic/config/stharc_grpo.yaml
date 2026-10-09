@@ -1,0 +1,201 @@
+# ======================================================================
+# STHARC-GRPO 配置 — Skill & Task Harness Agentic RL with Chains
+# ======================================================================
+# 用法：
+#   bash research/training_code_public/recipe/agentic/scripts/run_stharc_grpo.sh
+#
+# 关键约定：
+#   - agent loop = "stharc"（STHARCAgentLoop）
+#   - data_source = "ai_to_c"
+#   - task_chain 字段：JSON 字符串，含 K 个任务
+#   - uid 同一 chain_id 的 G 条样本构成一个 GRPO group
+#   - chain_reward = total_reward + lam * prospective_bonus
+#
+# STHARC 算法默认的唯一维护处：
+#   recipe/agentic/scripts/_research_workspace_paths.sh
+# 本 yaml 的 stharc.* 仅作 hydra 直启兜底；run_stharc_*.sh 会用 env 覆盖。
+# ======================================================================
+
+defaults:
+  - _self_
+
+hydra:
+  run:
+    dir: outputs/stharc_grpo/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen2.5-32B-Instruct
+    tokenizer_path: Qwen/Qwen2.5-32B-Instruct
+    external_lib: null
+    override_config: {}
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+
+  rollout:
+    name: vllm
+    temperature: 0.6
+    top_k: -1
+    top_p: 0.9
+    # G=4：同一 chain_id 的 4 条并行 chain 构成一个 GRPO group
+    n: 4
+    # response_ids 结构（K=3）：
+    #   task_0 rollout + task_1 prompt(mask=0) + task_1 rollout + task_2 prompt(mask=0) + task_2 rollout
+    # 估算上限：2048 + 8192 + 2048 + 8192 + 2048 = 22528，取 24576 留余量
+    prompt_length: 8192
+    response_length: 24576
+    tensor_model_parallel_size: 2
+    gpu_memory_utilization: 0.85
+    free_cache_engine: true
+    max_model_len: 24576
+    max_num_seqs: 128
+    log_prob_micro_batch_size_per_gpu: 4
+    log_prob_use_dynamic_bsz: true
+    log_prob_max_token_len_per_gpu: 26000
+    agent:
+      agent_loop_config_path: ???
+    multi_turn:
+      tool_config_path: null
+      function_tool_path: null
+    vllm:
+      max_model_len: 24576
+      max_num_seqs: 128
+    trace:
+      project_name: stharc_train
+      experiment_name: stharc_grpo_k3
+      backend: none
+      token2text: false
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 4
+    fsdp:
+      param_offload: false
+
+  actor:
+    loss_agg_mode: seq-mean-token-sum
+    micro_batch_size_per_gpu: 2
+    ppo_mini_batch_size: 64
+    ppo_micro_batch_size_per_gpu: 2
+    ppo_max_token_len_per_gpu: 26000
+    use_dynamic_bsz: true
+    grad_clip: 1.0
+    entropy_coeff: 0.001
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+    optim:
+      lr: 1e-6
+      weight_decay: 0.01
+    fsdp:
+      param_offload: false
+      grad_offload: false
+      optimizer_offload: false
+
+critic:
+  model:
+    path: null
+  optim:
+    lr: 0
+
+reward_model:
+  enable: false
+
+algorithm:
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: true
+  kl_penalty: low_var_kl
+
+data:
+  train_files: data/stharc_2w/train.parquet
+  val_files: data/stharc_2w/val.parquet
+  train_batch_size: 64
+  val_batch_size: 32
+  max_prompt_length: 16384
+  # response_length：K=3 时 3*512=1536，留足裕度
+  max_response_length: 8192
+  return_raw_prompt: true
+  return_raw_chat: true
+  shuffle: true
+  filter_overlong_prompts: false   # chain 模式下不过滤（prompt 是 task_0 的，不代表全 chain）
+  data_source: ai_to_c
+
+trainer:
+  total_epochs: 2
+  total_training_steps: 500
+  save_freq: 50
+  test_freq: 50
+  project_name: stharc_train
+  experiment_name: stharc_grpo_k3
+  logger: ["console", "swanlab"]
+  rollout_data_dir: /mnt/workspace/stharc_rl/rollout_logs/stharc_grpo_k3
+  default_hdfs_dir: /mnt/workspace/stharc_rl/checkpoints
+  wandb:
+    entity: null
+    project: stharc_train
+    name: stharc_grpo_k3
+  swanlab:
+    save_dir: /mnt/workspace/stharc_rl/swanlab
+
+# ── STHARC 专有配置 ─────────────────────────────────────────────────────────
+stharc:
+  env:
+    _target_: recipe.agentic.envs.AiToCReactEnv
+    ai_to_c_repo_path: /workspace/ai2c
+    session_dir_override: /tmp/rl_sessions
+    record_subagent_traces: false
+
+  reward:
+    components:
+      - _target_: recipe.agentic.reward.components.AiToCCombinedReward
+        weight: 1.0
+        enabled: true
+        use_completion_gate: true
+        use_step_score: false
+        target_steps: 3
+        max_steps: 7
+        reverse: true
+        no_baseline_fallback: nan
+        judge_max_tokens: 512
+        use_accuracy: false
+        waste_penalty_lambda: 0
+        waste_penalty_cap: 3
+    normalize: false
+    clip_min: 0.0
+    clip_max: 1.0
+
+  vllm_base_url: "http://127.0.0.1:8000/v1"
+  vllm_model_name: "qwen-32b-rl"
+  per_rollout_timeout_sec: 600
+
+  # ── STHARC 算法参数（脚本启动时由 _research_workspace_paths.sh 覆盖）────────
+  gamma: 0.9
+  lam: 0.25
+  attribution: "latest_only"
+  run_frozen_chain: false
+  base_user_id: "default"
+  # 拼 chain 前按任务截断（与脚本 MAX_RESP_LEN / MAX_PROMPT_LEN 对齐）
+  max_task_response_length: null
+  max_task_context_length: null
+
+  agent_loop_config_path: null
+
+# ── main_ppo_sync 必需的顶层字段（与 ppo_trainer.yaml 保持一致）────────────────
+transfer_queue:
+  enable: false
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: 100000
+      num_data_storage_units: 8
+
+ray_kwargs:
+  ray_init:
+    num_cpus: null
+  timeline_json_file: null
+
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null

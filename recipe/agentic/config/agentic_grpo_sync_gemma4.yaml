@@ -1,0 +1,129 @@
+# ======================================================================
+# Agentic GRPO 同步基线配置 — ai_to_c Gemma 4 31B 主脑训练
+# ======================================================================
+# 用法：
+#   bash verl/recipe/agentic/scripts/run_ai_to_c_gemma4_31b_sync.sh
+#
+# 关键约定：
+#   - data_source = "ai_to_c"
+#   - agent loop = "agentic"
+#   - reward 在 AgentLoop 内部算好；verl reward_score 只做透传
+# ======================================================================
+
+defaults:
+  - override hydra/launcher: ray
+  - _self_
+
+hydra:
+  run:
+    dir: outputs/agentic_grpo_sync_gemma4/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+actor_rollout_ref:
+  model:
+    path: /mnt/workspace/ckpt/gemma-4-31B-it
+    tokenizer_path: /mnt/workspace/ckpt/gemma-4-31B-it
+    external_lib: null
+    override_config: {}
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+
+  rollout:
+    name: vllm
+    temperature: 0.6
+    top_k: -1
+    top_p: 0.9
+    n: 1
+    prompt_length: 16384
+    response_length: 8192
+    tensor_model_parallel_size: 2
+    gpu_memory_utilization: 0.85
+    agent:
+      agent_loop_config_path: ???
+    multi_turn:
+      tool_config_path: null
+      function_tool_path: null
+    trace:
+      project_name: agentic_train_offline
+      experiment_name: ai_to_c_gemma4_31b_sync
+      backend: none
+      token2text: false
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 4
+    fsdp:
+      param_offload: false
+
+  actor:
+    micro_batch_size_per_gpu: 2
+    ppo_mini_batch_size: 64
+    ppo_micro_batch_size_per_gpu: 2
+    grad_clip: 1.0
+    entropy_coeff: 0.001
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+    optim:
+      lr: 1e-6
+      weight_decay: 0.01
+    fsdp:
+      param_offload: false
+      grad_offload: false
+      optimizer_offload: false
+
+critic:
+  model:
+    path: null
+  optim:
+    lr: 0
+
+reward_model:
+  enable: false
+
+data:
+  train_files: data/ai_to_c/train.parquet
+  val_files: data/ai_to_c/val.parquet
+  train_batch_size: 64
+  val_batch_size: 32
+  max_prompt_length: 16384
+  max_response_length: 8192
+  return_raw_prompt: true
+  return_raw_chat: true
+  shuffle: true
+  filter_overlong_prompts: true
+  data_source: ai_to_c
+
+trainer:
+  total_epochs: 1
+  total_training_steps: 500
+  save_freq: 50
+  test_freq: 50
+  project_name: agentic_train_offline
+  experiment_name: ai_to_c_gemma4_31b_sync
+  logger: ["console", "wandb"]
+  wandb:
+    entity: null
+    project: agentic_train_offline
+    name: ai_to_c_gemma4_31b_sync
+  rollout_data_dir: /mnt/workspace/agentic_rl/rl/rollout_logs/ai_to_c_gemma4_31b_sync
+
+agentic:
+  env:
+    _target_: recipe.agentic.envs.AiToCReactEnv
+    ai_to_c_repo_path: /workspace/ai2c
+    session_dir_override: /tmp/rl_sessions
+    record_subagent_traces: false
+
+  reward:
+    components:
+      - _target_: recipe.agentic.reward.components.AiToCEfficientReward
+        weight: 1.0
+        enabled: true
+        target_steps: 3
+        max_steps: 7
+    normalize: false
+    clip_min: 0.0
+    clip_max: 1.0
+
+  vllm_base_url: "http://127.0.0.1:8000/v1"
+  vllm_model_name: "gemma-4-31b-rl"
+  per_rollout_timeout_sec: 600
+  agent_loop_config_path: null

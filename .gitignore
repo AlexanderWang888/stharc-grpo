@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Test / type-check cache
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Local isolation-test scratch
+training_isolation_test_tmp/
+
+# Backup / variant files
+*.bak
+*.new
+
+# Editor / OS
+.DS_Store
+*.swp
+
+# Internal release notes (not for public)
+public_cleanup_validation.txt

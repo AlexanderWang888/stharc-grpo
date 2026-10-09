@@ -1,0 +1,217 @@
+# ======================================================================
+# STHARC-GRPO 配置（公开数据集 / 业务解耦版） — Idea2 credit assignment 验证
+# ======================================================================
+# ⚠️ 注意（2026-07-22）：run_stharc_grpo_public.sh 已不再通过
+# --config-path/--config-name 加载本文件！原因：本文件 `defaults: - _self_`
+# 完全绕开了 verl 官方 verl/trainer/config/ppo_trainer.yaml 的 defaults 组合
+# 树（critic/reward/model/rollout 等子 schema 不会被组合进来），导致
+# verl.trainer.ppo.utils.need_critic()/need_reward_model() 访问
+# config.critic.enable / config.reward.reward_model.* 时报
+# "Key 'xxx' is not in struct"。现在改为让 hydra 走 main_ppo_sync.py 默认的
+# config_name="ppo_trainer"，所有字段（包括下面的 stharc.* 专有配置）都通过
+# run_stharc_grpo_public.sh 里的 CLI overrides 传入。本文件仅作为字段取值的
+# 参考文档保留，不再被脚本实际加载。
+# ======================================================================
+# 与 stharc_grpo.yaml 的关键差异：
+#   - env          : recipe.agentic.envs.GenericBenchmarkEnv（自建 ReAct 循环 +
+#                     8 个 harness 工具，不依赖 ai2c 业务代码/monkeypatch）
+#   - harness state: recipe.agentic.stharc.generic_harness_state（进程内 dict
+#                     沙箱，替代 ai2c 版基于文件系统 + copytree 的 HarnessState）
+#   - reward       : recipe.agentic.reward.ExactMatchReward（精确匹配，替代
+#                     依赖 ai2c 业务判分器的 AiToCCombinedReward）
+#   - data         : research/dataset_explore/idea2_datasets/build_idea2_datasets.py
+#                     产出的 6 个数据集混合 parquet（credit_diagnostic_memory /
+#                     credit_diagnostic_skill_modify / musique / textcraft /
+#                     skill_delete / memory_invalidate），链长 K 由内容参数决定，
+#                     不写死（与 K=3 版 stharc_grpo.yaml 的核心区别）。
+#
+# 用法：
+#   bash research/training_code_public/recipe/agentic/scripts/run_stharc_grpo_public.sh
+#
+# 数据准备（先于训练运行）：
+#   PYTHONPATH=research/training_code_public:. python3 \
+#       research/dataset_explore/idea2_datasets/build_idea2_datasets.py \
+#       --out-dir research/dataset_explore/idea2_datasets_out \
+#       --parquet-dir research/training_code_public/data/stharc_public
+# ======================================================================
+
+defaults:
+  - _self_
+
+hydra:
+  run:
+    dir: outputs/stharc_grpo_public/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen2.5-7B-Instruct
+    tokenizer_path: Qwen/Qwen2.5-7B-Instruct
+    external_lib: null
+    override_config: {}
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+
+  rollout:
+    name: vllm
+    temperature: 0.7
+    top_k: -1
+    top_p: 0.9
+    # G=4：同一 chain_id 的 4 条并行 chain 构成一个 GRPO group
+    n: 4
+    # K 不固定（内容参数决定，见 build_idea2_datasets.py 的 chain_length_stats）；
+    # 按数据集实测最大 K（textcraft 多线程可到 ~20 任务）留出裕度
+    prompt_length: 4096
+    response_length: 16384
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.75
+    free_cache_engine: true
+    max_model_len: 32768
+    max_num_seqs: 128
+    log_prob_micro_batch_size_per_gpu: 4
+    log_prob_use_dynamic_bsz: true
+    log_prob_max_token_len_per_gpu: 18000
+    agent:
+      agent_loop_config_path: ???
+    multi_turn:
+      tool_config_path: null
+      function_tool_path: null
+    trace:
+      project_name: stharc_train_public
+      experiment_name: stharc_grpo_public
+      backend: none
+      token2text: false
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 4
+    fsdp:
+      param_offload: false
+
+  actor:
+    loss_agg_mode: seq-mean-token-sum
+    micro_batch_size_per_gpu: 2
+    ppo_mini_batch_size: 64
+    ppo_micro_batch_size_per_gpu: 2
+    ppo_max_token_len_per_gpu: 18000
+    use_dynamic_bsz: true
+    grad_clip: 1.0
+    entropy_coeff: 0.001
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+    optim:
+      lr: 1e-6
+      weight_decay: 0.01
+    fsdp:
+      param_offload: false
+      grad_offload: false
+      optimizer_offload: false
+
+critic:
+  model:
+    path: null
+  optim:
+    lr: 0
+
+reward_model:
+  enable: false
+
+algorithm:
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: true
+  kl_penalty: low_var_kl
+
+data:
+  train_files: data/stharc_public/train.parquet
+  val_files: data/stharc_public/val.parquet
+  train_batch_size: 64
+  val_batch_size: 32
+  max_prompt_length: 8192
+  max_response_length: 16384
+  return_raw_prompt: true
+  return_raw_chat: true
+  shuffle: true
+  filter_overlong_prompts: false   # chain 模式下不过滤（prompt 是 task_0 的，不代表全 chain）
+  data_source: stharc
+
+trainer:
+  total_epochs: 2
+  total_training_steps: 500
+  save_freq: 50
+  test_freq: 50
+  project_name: stharc_train_public
+  experiment_name: stharc_grpo_public
+  logger: ["console"]
+  rollout_data_dir: /tmp/stharc_public_rl/rollout_logs/stharc_grpo_public
+  default_hdfs_dir: /tmp/stharc_public_rl/checkpoints
+  wandb:
+    entity: null
+    project: stharc_train_public
+    name: stharc_grpo_public
+
+# ── STHARC 专有配置（业务解耦版）───────────────────────────────────────────────
+stharc:
+  env:
+    _target_: recipe.agentic.envs.GenericBenchmarkEnv
+    max_steps: 8
+    temperature: 0.7
+    max_tokens: 1024
+    request_timeout: 120.0
+
+  # HarnessState 实现换成进程内 dict 沙箱（见 generic_harness_state.py 顶部说明），
+  # 不需要 ai2c 的文件系统 copytree 初始化
+  harness_state_module: recipe.agentic.stharc.generic_harness_state
+
+  reward:
+    components:
+      - _target_: recipe.agentic.reward.ExactMatchReward
+        weight: 1.0
+        enabled: true
+        case_sensitive: false
+        strip_punctuation: true
+        numeric_tolerance: 1e-3
+        allow_substring: true
+        substring_slack_chars: 20
+    normalize: false
+    clip_min: 0.0
+    clip_max: 1.0
+
+  vllm_base_url: "http://127.0.0.1:8000/v1"
+  vllm_model_name: "qwen-7b-rl"
+  per_rollout_timeout_sec: 600
+
+  # ── STHARC 算法参数 ──────────────────────────────────────────────────────
+  gamma: 0.9
+  lam: 0.25
+  # Paper task-position proxies; no extra curate rollout or prompt injection.
+  credit: "pu"
+  attribution: "latest_only"
+  run_frozen_chain: false
+  base_user_id: "default"
+  max_task_response_length: null
+  max_task_context_length: null
+  # 截断默认只检测打点（trace/trunc/*），不中断训练
+  abort_on_packing_truncation: false
+  abort_on_exec_truncation: false
+
+  agent_loop_config_path: null
+
+# ── main_ppo_sync 必需的顶层字段（与 ppo_trainer.yaml 保持一致）────────────────
+transfer_queue:
+  enable: false
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: 100000
+      num_data_storage_units: 8
+
+ray_kwargs:
+  ray_init:
+    num_cpus: null
+  timeline_json_file: null
+
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null
